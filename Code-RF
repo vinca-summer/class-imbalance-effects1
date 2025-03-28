@@ -1,0 +1,246 @@
+# This code simulates a Random Forest classification problem with two groups (A and B)  
+# and evaluates model performance using a sliding window approach.  
+# It generates 50 features with a subtle mean difference between groups.  
+# Data is split into training and testing sets, with test set sizes dynamically adjusted.  
+# Both test and train set for Group A decrease while those for Group B increase.  
+# Multiple iterations are performed for each configuration to ensure robustness.  
+# A Random Forest model is trained on the selected training set.  
+# Predictions are made on the test set, and a confusion matrix is computed.  
+# Performance metrics such as accuracy, precision, recall, and AUC are calculated.  
+# Results from all iterations are summarized and plotted. 
+
+
+
+library(dplyr)
+library(randomForest)
+library(pROC)
+library(openxlsx)
+library(ggplot2)
+
+# Set parameters
+n_samples <- 4000        # Total number of samples (2000 for Group_A, 2000 for Group_B)
+n_features <- 50         # Number of features
+
+# Create a binary group variable (2000 samples of A and 2000 samples of B)
+group <- c(rep("A", 2000), rep("B", 2000))
+
+set.seed(123)  # Set a seed for reproducibility
+
+# Simulate 50 features with a subtle mean difference and moderate noise
+features <- matrix(rnorm(n_samples * n_features, 
+                         mean = as.numeric(group == "B") * 0.3, 
+                         sd = 1.2), 
+                   nrow = n_samples, 
+                   ncol = n_features)
+
+# Combine into a dataframe
+data_full <- data.frame(group = factor(group, levels = c("A", "B")), features)
+
+# Subset of data for testing (take 500 from Group A and all of Group B)
+data <- data_full[1501:nrow(data_full), ]
+
+# Initialize results dataframe
+results <- data.frame(
+    iteration = integer(),
+    group_A_train = numeric(),
+    group_B_train = numeric(),
+    total_test_A = numeric(),
+    total_test_B = numeric(),
+    test_cm_A_A = numeric(),
+    test_cm_A_B = numeric(),
+    test_cm_B_A = numeric(),
+    test_cm_B_B = numeric(),
+    auc_test = numeric(),
+    stringsAsFactors = FALSE
+)
+
+# Get all sample indices for groups A and B
+group_A_indices <- which(data$group == "A")
+group_B_indices <- which(data$group == "B")
+
+# Sliding window parameters
+initial_size <- 500
+step_size <- 5          # Step size for increasing Group B samples and decreasing Group A samples
+num_configs <- 91       # Total configurations (sliding window steps)
+iterations <- 10        # Number of repeats for each configuration
+
+# Set initial test set sizes
+initial_test_A_size <- 100
+initial_test_B_size <- 100
+
+# Function to extract confusion matrix values (avoids repeating the same code)
+extract_conf_matrix_values <- function(conf_matrix) {
+    c(
+        AA = ifelse("A" %in% rownames(conf_matrix) && "A" %in% colnames(conf_matrix), conf_matrix["A", "A"], 0),
+        AB = ifelse("B" %in% rownames(conf_matrix) && "A" %in% colnames(conf_matrix), conf_matrix["B", "A"], 0),
+        BA = ifelse("A" %in% rownames(conf_matrix) && "B" %in% colnames(conf_matrix), conf_matrix["A", "B"], 0),
+        BB = ifelse("B" %in% rownames(conf_matrix) && "B" %in% colnames(conf_matrix), conf_matrix["B", "B"], 0)
+    )
+}
+
+# Perform iterations for each configuration
+for (idx in seq_len(num_configs)) {
+    # Adjust test sizes based on the current configuration
+    group_A_test_size <- initial_test_A_size - (idx - 1)
+    group_B_test_size <- initial_test_B_size + (idx - 1)
+    
+    # Perform random iterations for each configuration
+    for (iter in 1:iterations) {
+        # Sample training and test sets for Group A
+        group_A_train <- sample(group_A_indices, size = floor(0.8 * (initial_size - (idx - 1) * step_size)))
+        group_A_test <- setdiff(group_A_indices, group_A_train)[1:group_A_test_size]
+        
+        # Sample training and test sets for Group B
+        group_B_subset <- group_B_indices[1:(initial_size + (idx - 1) * step_size)]
+        group_B_train <- sample(group_B_subset, size = floor(0.8 * (initial_size + (idx - 1) * step_size)))
+        group_B_test <- setdiff(group_B_subset, group_B_train)[1:group_B_test_size]
+        
+        # Combine training and testing indices
+        train_indices <- c(group_A_train, group_B_train)
+        test_indices <- c(group_A_test, group_B_test)
+        
+        # Split the data
+        train_data <- data[train_indices, ]
+        test_data <- data[test_indices, ]
+        
+        # Fit a random forest model
+        rf_model <- randomForest(group ~ ., data = train_data, importance = TRUE)
+        
+        # Make predictions for the test set
+        test_predictions <- predict(rf_model, newdata = test_data, type = "response")
+        test_probabilities <- predict(rf_model, newdata = test_data, type = "prob")[, "B"]
+        
+        # Compute confusion matrix for the test set
+        test_conf_matrix <- table(Predicted = test_predictions, Actual = test_data$group)
+        
+        # Extract values from the confusion matrix
+        conf_values_test <- extract_conf_matrix_values(test_conf_matrix)
+        
+        # Calculate AUC for the test set
+        roc_obj <- roc(test_data$group, test_probabilities)
+        auc_test <- auc(roc_obj)
+        
+        # Record results for the current iteration in the results dataframe
+        results <- rbind(results, data.frame(
+            iteration = iter,
+            group_A_train = length(group_A_train),
+            group_B_train = length(group_B_train),
+            total_test_A = length(group_A_test),
+            total_test_B = length(group_B_test),
+            test_cm_A_A = conf_values_test[1],
+            test_cm_A_B = conf_values_test[2],
+            test_cm_B_A = conf_values_test[3],
+            test_cm_B_B = conf_values_test[4],
+            auc_test = auc_test
+        ))
+    }
+}
+
+# Calculate performance metrics from the confusion matrix
+results$accuracy_test <- (results$test_cm_A_A + results$test_cm_B_B) / 
+    (results$test_cm_A_A + results$test_cm_A_B + results$test_cm_B_A + results$test_cm_B_B)
+
+results$precision_test <- results$test_cm_A_A / (results$test_cm_A_A + results$test_cm_B_A)
+
+results$recall_test <- results$test_cm_A_A / (results$test_cm_A_A + results$test_cm_A_B)
+
+results$f1_score_test <- 2 * (results$precision_test * results$recall_test) / 
+    (results$precision_test + results$recall_test)
+
+# Save results to Excel
+write.xlsx(results, "test_RF_sizes_raw.xlsx")
+
+
+# Group by group_A_train and compute the mean for each metric
+results_summary <- results %>%
+    group_by(group_A_train) %>%
+    summarise(
+        group_B_train = mean(group_B_train),
+        total_test_A = mean(total_test_A),
+        total_test_B = mean(total_test_B),
+        test_cm_A_A = round(mean(test_cm_A_A), 1),
+        test_cm_A_B = round(mean(test_cm_A_B), 1),
+        test_cm_B_A = round(mean(test_cm_B_A), 1),
+        test_cm_B_B = round(mean(test_cm_B_B), 1),
+        accuracy_test = mean(accuracy_test),
+        precision_test = mean(precision_test),
+        recall_test = mean(recall_test),
+        f1_score_test = mean(f1_score_test),
+        auc_test = mean(auc_test)
+    ) %>%
+    ungroup()
+
+results_summary$Percent_A_to_all <- 100 * (results_summary$group_A_train + results_summary$total_test_A)/(results_summary$group_A_train + results_summary$group_B_train + results_summary$total_test_A + results_summary$total_test_B)
+results_summary$Percent_true_A <- round(100 * results_summary$test_cm_A_A/results_summary$total_test_A, 1)
+results_summary$Percent_true_B <- round(100 * results_summary$test_cm_B_B/results_summary$total_test_B, 1)
+
+write.xlsx(results_summary, "test_RF_sizes_averaged.xlsx")
+
+
+
+# Plotting
+xxx <- read.xlsx("test_RF_sizes_averaged.xlsx")
+
+ggplot(xxx, aes(x = Percent_A_to_all)) +
+    geom_line(aes(y = Percent_true_A, color = "A")) +
+    geom_line(aes(y = Percent_true_B, color = "B")) +
+    scale_color_manual(
+        values = c("A" = "red", "B" = "blue"),
+        labels = c("Group A", "Group B")
+    ) +
+    labs(x = "Percent of Group A in Total Data", 
+         y = "Percent Correctly Identified Samples", 
+         color = NULL,  # Suppress legend title
+         title = "Random Forest") +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    # Vertical dashed lines in purple that stop at Percent_true_A
+    geom_segment(aes(x = 40, xend = 40, 
+                     y = 0, 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 40))]), 
+                 linetype = "dashed", color = "purple") +
+    geom_segment(aes(x = 45, xend = 45, 
+                     y = 0, 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 45))]), 
+                 linetype = "dashed", color = "purple") +
+    geom_segment(aes(x = 50, xend = 50, 
+                     y = 0, 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 50))]), 
+                 linetype = "dashed", color = "purple") +
+    # Horizontal dashed lines in purple from y-axis to the intersection points
+    geom_segment(aes(x = 0, xend = 40, 
+                     y = Percent_true_A[which.min(abs(Percent_A_to_all - 40))], 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 40))]),
+                 linetype = "dashed", color = "purple") +
+    geom_segment(aes(x = 0, xend = 45, 
+                     y = Percent_true_A[which.min(abs(Percent_A_to_all - 45))], 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 45))]),
+                 linetype = "dashed", color = "purple") +
+    geom_segment(aes(x = 0, xend = 50, 
+                     y = Percent_true_A[which.min(abs(Percent_A_to_all - 50))], 
+                     yend = Percent_true_A[which.min(abs(Percent_A_to_all - 50))]),
+                 linetype = "dashed", color = "purple")
+
+
+ggplot(xxx, aes(x = Percent_A_to_all)) +
+    geom_line(aes(y = accuracy_test, color = "accuracy_test")) +
+    geom_line(aes(y = precision_test, color = "precision_test")) +
+    geom_line(aes(y = recall_test, color = "recall_test")) +
+    geom_line(aes(y = f1_score_test, color = "f1_score_test")) +
+    geom_line(aes(y = auc_test, color = "auc_test")) +
+    scale_color_manual(values = c("accuracy_test" = "blue", 
+                                  "precision_test" = "red", 
+                                  "recall_test" = "green", 
+                                  "f1_score_test" = "purple", 
+                                  "auc_test" = "orange"),
+        labels = c("Accuracy", "AUC", "f1 Score", "Precision", "Recall")
+    ) +
+    ylim(0, NA) +  
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    labs(x = "Percent of Group A in Total Data", 
+         y = "", 
+         color = NULL, 
+         title = "Random Forest")
+
+

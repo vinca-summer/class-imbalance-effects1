@@ -1,0 +1,54 @@
+# The code generates 50 features with a subtle mean difference between groups.  
+# The code plots PCA for 500 samples from Group A and 500 samples from Group B
+
+
+library(dplyr)
+library(tidyverse)
+library(randomForest)
+library(pROC)
+library(openxlsx)
+
+
+# Set parameters
+n_samples <- 4000        # Total number of samples (2000 for Group_A, 2000 for Group_B)
+n_features <- 50         # Number of features
+
+# Create a binary group variable (2000 samples of A and 2000 samples of B)
+group <- c(rep("A", 2000), rep("B", 2000))
+
+set.seed(123)  # Set a seed for reproducibility
+
+# Simulate 50 features with a subtle mean difference and moderate noise
+features <- matrix(rnorm(n_samples * n_features, 
+                         mean = as.numeric(group == "B") * 0.3, 
+                         sd = 1.2), 
+                   nrow = n_samples, 
+                   ncol = n_features)
+
+# Combine into a dataframe
+data_full <- data.frame(group = factor(group, levels = c("A", "B")), features)
+
+# PCA for 1000 samples
+data <- data_full[1501:2501, ]
+data1 <- as.matrix(data[,-1])
+
+# Perform PCA
+pca <- prcomp(data1, scale. = TRUE)
+pca_data <- as.data.frame(pca$x)
+
+# Add group information to PCA data
+pca_data$group <- factor(data$group)
+
+# Create PCA plot 
+ggplot(pca_data, aes(x = PC1, y = PC2, fill = group, color = group)) +
+    geom_point(alpha = 0.7, size = 4, shape = 21, stroke = 0.3) +
+    scale_fill_manual(values = c("A" = "#fc8d62", "B" = "#66c2a5"),
+                      labels = c("Group A", "Group B")) +
+    scale_color_manual(values = c("A" = "#d53e4f", "B" = "#3288bd"),
+                       labels = c("Group A", "Group B")) +
+    labs(title = "PCA Plot of Simulated Data") +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        legend.title = element_blank()
+    )
